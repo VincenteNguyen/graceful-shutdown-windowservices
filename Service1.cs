@@ -6,6 +6,7 @@ using System.ServiceProcess;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Timers;
+using NLog;
 using Timer = System.Timers.Timer;
 
 namespace Service1
@@ -15,7 +16,7 @@ namespace Service1
         private CancellationTokenSource _cancellationTokenSource;
         private ConcurrentDictionary<Task, int> _tasks;
         private Timer _timer;
-        private const string Path = "E:\\Logs\\WindowsServiceLog.txt";
+        public static Logger Log = LogManager.GetCurrentClassLogger();
         public Service1()
         {
             InitializeComponent();
@@ -29,43 +30,49 @@ namespace Service1
 
             _timer = new Timer();
             _timer.Elapsed += RunElapsed;
-            _timer.Interval = 1000;
+            _timer.Interval = 10000;
             _timer.Start();
         }
 
         private void RunElapsed(object sender, ElapsedEventArgs e)
         {
-            var id = Guid.NewGuid();
-            WriteToFile($"RunElapsed {id} start");
-            _tasks.TryAdd(Task.Run(() => RunSync(_cancellationTokenSource.Token)).ContinueWith(x => _tasks.TryRemove(x, out _)), 1);
-            WriteToFile($"RunElapsed {id} done");
+            var childCts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationTokenSource.Token);
+            childCts.CancelAfter(TimeSpan.FromSeconds(2));
+            var task = Task.Run(() =>
+                {
+                    return RunSync(childCts.Token);
+                })
+                .ContinueWith(async x =>
+                {
+                    var result = await x;
+                    foreach (var entry in _tasks.Where(y => y.Key.IsCompleted))
+                        _tasks.TryRemove(entry.Key, out _);
+                });
+            _tasks.TryAdd(task, 1);
         }
 
-        private void RunSync(CancellationToken cancellationToken)
+        private int RunSync(CancellationToken cancellationToken)
         {
             var id = Guid.NewGuid();
-            Thread.Sleep(1000);
+            Thread.Sleep(10000);
             if (cancellationToken.IsCancellationRequested)
             {
-                WriteToFile($"{id} cancelled, return the method");
-                return;
+                return 0;
             }
 
-            WriteToFile($"Start {id}");
-            for (var i = 0; i < 4; i++) //loop processing
+            int i;
+            for (i = 0; i < 4; i++) //loop processing
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    WriteToFile($"{id} cancelled, break the loop");
                     break;
                 }
 
                 //Do the work
-                Thread.Sleep(5000); //example long-running 
-                WriteToFile($"Wait - {id} - {i}");
+                Thread.Sleep(2000); //example long-running 
             }
 
-            WriteToFile($"Done {id}");
+            return i;
         }
 
         private async Task RunAsync(CancellationToken cancellationToken)
@@ -74,41 +81,31 @@ namespace Service1
             await Task.Delay(1000);
             if (cancellationToken.IsCancellationRequested)
             {
-                WriteToFile($"{id} cancelled, return the method");
                 return;
             }
 
-            WriteToFile($"Start {id}");
             for (var i = 0; i < 4; i++)
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    WriteToFile($"{id} cancelled, break the loop");
                     break;
                 }
 
                 //Do the work
                 await Task.Delay(5000); //example long-running 
-                WriteToFile($"Wait - {id} - {i}");
             }
 
-            WriteToFile($"Done {id}");
         }
 
         public static void WriteToFile(string text)
         {
-            using (var writer = new StreamWriter(Path, true))
-            {
-                writer.WriteLine($"{DateTime.Now} - {text}");
-                writer.Close();
-            }
+            Log.Info(text);
         }
 
         protected override void OnStop()
         {
             try
             {
-                WriteToFile("Stop");
                 _timer.Stop();
                 _cancellationTokenSource.Cancel();
                 WriteToFile("Graceful waiting");
